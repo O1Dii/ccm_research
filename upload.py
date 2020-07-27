@@ -3,7 +3,7 @@ from set_env import set_env_from_env_file
 import os
 
 
-def upload_blob(filename, conn_str=None, container=None):
+def upload_blob(filename, conn_str=None, container=None, **kwargs):
     set_env_from_env_file()
 
     if not conn_str:
@@ -16,4 +16,4 @@ def upload_blob(filename, conn_str=None, container=None):
     blob_client = blob_service_client.get_blob_client(container=container, blob=filename)
 
     with open(filename, "rb") as data:
-        blob_client.upload_blob(data)
+        blob_client.upload_blob(data, **kwargs)

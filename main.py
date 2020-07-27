@@ -2,6 +2,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.sql import text
 import urllib
 import pandas as pd
+from upload import upload_blob
+import plotly.express as px
+
+from pdf_report import PDFReport
 
 server='tcp:ysm-sync-prod1.ysmdevs.com'
 driver='{ODBC Driver 17 for SQL Server}'
@@ -26,6 +30,23 @@ a.[8] as adjustedbaselinescore8,c.score as finalscore from(select objectid,match
 piv PIVOT(max(adjustment) for adjustType in([0],[1],[2],[3],[4],[5],[6],[7],[8])) as a inner join news_baseline as b on a.objectid=b.objectid and
 a.matchid=b.matchid left join ccm_index as c on c.objectid=b.objectid and c.matchid=b.matchid and
 c.indextype=1000 inner join specialists as d on d.objectid=a.matchid inner join news as e on e.objectid=a.objectid order by e.objectid""")
+complicated_query_template = """DECLARE @colquery AS NVARCHAR(MAX),
+@cols AS NVARCHAR(MAX),
+ @query  AS NVARCHAR(MAX),
+ @tbl as varchar(50),
+ @objectid as varchar(50),
+ @matchVariant as varchar(50);
+ set @objectid={}
+ set @matchVariant=300
+ set @tbl='specialists_match'
+SET @colquery = 'select @cols= STUFF((select distinct ''],['' + cast(a.matchtype as varchar(50))+''--''+case when b.label is null then ''No Match'' else b.label end as label from '+@tbl+' as a left join matchtype as b on b.matchtype=a.matchType where  matchVariant = @matchVariant FOR XML PATH(''''), TYPE).value(''.'', ''NVARCHAR(MAX)'') ,1,2,'''')+'']''' --objectid = @objectid and
+EXEC sp_executesql @colquery, N'@matchVariant varchar(50),@objectid varchar(50),@cols VARCHAR(MAX) OUTPUT',
+@matchVariant=@matchVariant,@objectid = @objectid,@cols = @cols OUTPUT
+select @cols
+set @query = 'select * from(select cast(a.matchtype as varchar(50))+''--''+case when b.label is null then ''No Match'' else b.label end as label, matchid,objectid,score from '+@tbl+' as a left join matchtype as b on b.matchtype=a.matchType where  matchVariant = @matchVariant) as piv pivot(max(score) for label in('+@cols+')) as pivotq'
+--objectid = @objectid and
+EXEC sp_executesql @query, N'@matchVariant varchar(50),@objectid varchar(50)',
+@matchVariant=@matchVariant,@objectid = @objectid"""
 
 
 def create_dataframe_from_sql(statement):
@@ -37,10 +58,65 @@ def create_dataframe_from_sql(statement):
         for row in res:
             rows.append(row)
 
-        df = pd.DataFrame(rows)
+        df = pd.DataFrame(rows).rename(columns={i: v for i, v in enumerate(res.keys())})
 
         return df
 
-print(create_dataframe_from_sql(factsheets_adjust_statement))
-print(create_dataframe_from_sql(news_adjust_statement))
+factsheets_df = create_dataframe_from_sql(factsheets_adjust_statement)
+news_df = create_dataframe_from_sql(news_adjust_statement)
+
+factsheets_report = PDFReport()
+news_report = PDFReport()
+
+for df, report in [(factsheets_df, factsheets_report), (news_df, news_report)]:
+    for condition_title in df['ConditionTitle'].unique():
+        condition_filtered_df = df.loc[df.ConditionTitle == str(condition_title)]
+
+        top_baseline = condition_filtered_df.nlargest(10, 'baselinescore')
+        top_final = condition_filtered_df.nlargest(10, 'finalscore')
+
+        fig_baseline = px.histogram(condition_filtered_df, x="baselinescore")
+        fig_final = px.histogram(condition_filtered_df, x="finalscore")
+
+        report.add_html(
+            f'<h1 style="text-align: center">{condition_title}</h1><br>'
+        )
+        report.add_figure(fig_baseline)
+        report.add_html('<br>')
+        report.add_figure(fig_final)
+        report.add_html(
+            '<p>Top baseline score doctors</p>'
+            '<ol>' + ''.join([f"<li>{each['nameFull']} - {each['baselinescore']}</li>" for index, each in top_baseline.iterrows()]) + '</ol>'
+        )
+        report.add_html(
+            '<p>Top final score doctors</p>'
+            '<ol>' + ''.join([f"<li>{each['nameFull']} - {each['finalscore']}</li>" for index, each in top_final.iterrows()]) + '</ol>'
+        )
+        report.add_html(
+            top_final\
+                .drop(columns=['objectid'])\
+                .rename(columns={f'adjustedbaselinescore{i}':f'adj{i}' for i in range(9)})\
+                .rename(columns={
+                'ConditionTitle': 'condition',
+                'nameFull': 'name',
+                'baselinescore': 'base',
+                'finalscore': 'final'
+            })\
+                .to_html(index=False)
+        )
+
+        report.add_html(
+            '<p>' + str(create_dataframe_from_sql(text(complicated_query_template.format(condition_filtered_df['objectid'].iloc[0]))).iloc[0][0]) + '</p>'
+        )
+
+        report.add_html('<br>')
+
+factsheets_report.export_report_to_pdf('factsheets_report.pdf')
+news_report.export_report_to_pdf('news_report.pdf')
+
+factsheets_df.to_csv('factsheets.csv')
+news_df.to_csv('news.csv')
+
+upload_blob('factsheets_report.pdf', overwrite=True)
+upload_blob('news_report.pdf', overwrite=True)
 
