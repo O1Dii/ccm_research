@@ -68,6 +68,23 @@ news_df = create_dataframe_from_sql(news_adjust_statement)
 factsheets_report = PDFReport()
 news_report = PDFReport()
 
+factsheets_report.add_css('bootstrap.min.css')
+news_report.add_css('bootstrap.min.css')
+
+styles = '''<style>
+.table {
+    font-size: 10px;
+}
+.table td, .table th, .table tr {
+    text-align: center;
+    padding: 5px 0 0 0;
+}
+</style>
+'''
+
+factsheets_report.add_html(styles)
+news_report.add_html(styles)
+
 for df, report in [(factsheets_df, factsheets_report), (news_df, news_report)]:
     for condition_title in df['ConditionTitle'].unique():
         condition_filtered_df = df.loc[df.ConditionTitle == str(condition_title)]
@@ -84,32 +101,47 @@ for df, report in [(factsheets_df, factsheets_report), (news_df, news_report)]:
         report.add_figure(fig_baseline)
         report.add_html('<br>')
         report.add_figure(fig_final)
+#     report.add_html(
+#         '<p>Top baseline score doctors</p>'
+#         '<ol>' + ''.join([f"<li>{each['nameFull']} - {each['baselinescore']}</li>" for index, each in top_baseline.iterrows()]) + '</ol>'
+#     )
+#     report.add_html(
+#         '<p>Top final score doctors</p>'
+#         '<ol>' + ''.join([f"<li>{each['nameFull']} - {each['finalscore']}</li>" for index, each in top_final.iterrows()]) + '</ol>'
+#     )
+        top_baseline_table = pd.DataFrame({'full name': top_baseline['nameFull'], 'score': top_baseline['baselinescore']})\
+                .reset_index(drop=True)
+        top_baseline_table.index = top_baseline_table.index + 1
         report.add_html(
-            '<p>Top baseline score doctors</p>'
-            '<ol>' + ''.join([f"<li>{each['nameFull']} - {each['baselinescore']}</li>" for index, each in top_baseline.iterrows()]) + '</ol>'
+            '<p>Top baseline score doctors</p>' + 
+            top_baseline_table.to_html(header=False, classes=['table', 'table-condensed'])
         )
+
+        top_final_table = pd.DataFrame({'full name': top_final['nameFull'], 'score': top_final['finalscore']})\
+                .reset_index(drop=True)
+        top_final_table.index = top_final_table.index + 1
         report.add_html(
-            '<p>Top final score doctors</p>'
-            '<ol>' + ''.join([f"<li>{each['nameFull']} - {each['finalscore']}</li>" for index, each in top_final.iterrows()]) + '</ol>'
+            '<p>Top final score doctors</p>' + 
+            top_final_table.to_html(header=False, classes=['table'])
         )
-        report.add_html(
-            top_final\
-                .drop(columns=['objectid'])\
+
+        insights_df = top_final\
+                .drop(columns=['objectid', 'ConditionTitle', 'matchid'])\
                 .rename(columns={f'adjustedbaselinescore{i}':f'adj{i}' for i in range(9)})\
                 .rename(columns={
                 'ConditionTitle': 'condition',
                 'nameFull': 'name',
                 'baselinescore': 'base',
                 'finalscore': 'final'
-            })\
-                .to_html(index=False)
-        )
-
+            })
         report.add_html(
-            '<p>' + str(create_dataframe_from_sql(text(complicated_query_template.format(condition_filtered_df['objectid'].iloc[0]))).iloc[0][0]) + '</p>'
+            insights_df.head(5).transpose().to_html(header=False, classes=['table'])
         )
-
+        report.add_html(
+            insights_df.tail(5).transpose().to_html(header=False, classes=['table'])
+        )
         report.add_html('<br>')
+
 
 factsheets_report.export_report_to_pdf('factsheets_report.pdf')
 news_report.export_report_to_pdf('news_report.pdf')

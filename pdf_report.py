@@ -7,6 +7,10 @@ class PDFReport:
         self.__image_template = '<img style="width: {width}; height: {height}" src="data:image/png;base64,{image}">'
         self.__report_html = ''
 
+    def add_css(self, filename):
+        with open(filename, 'r') as f:
+            self.__report_html += '<style>' + f.read() + '</style>'
+
     def add_figure(self, figure, width=600, height=300):
         image = base64.b64encode(figure.to_image(format='png', width=width, height=height)).decode('utf-8')
 
