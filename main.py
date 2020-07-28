@@ -140,6 +140,9 @@ for df, report in [(factsheets_df, factsheets_report), (news_df, news_report)]:
         report.add_html(
             insights_df.tail(5).transpose().to_html(header=False, classes=['table'])
         )
+        report.add_html(
+            '<p>' + str(create_dataframe_from_sql(text(complicated_query_template.format(condition_filtered_df['objectid'].iloc[0]))).iloc[0][0]) + '</p>'
+        )
         report.add_html('<br>')
 
 
