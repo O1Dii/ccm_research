@@ -19,10 +19,10 @@ engine = create_engine(f'mssql+pyodbc:///?odbc_connect={odbc_params}')
 adjust_statement_template = """select e.ConditionTitle,a.objectid,d.nameFull,a.matchid,b.score as baselinescore,
 a.[0] as adjustedbaselinescore0,a.[1] as adjustedbaselinescore1,a.[2] as adjustedbaselinescore2,a.[3] as adjustedbaselinescore3,
 a.[4] as adjustedbaselinescore4,a.[5] as adjustedbaselinescore5,a.[6] as adjustedbaselinescore6,a.[7] as adjustedbaselinescore7,
-a.[8] as adjustedbaselinescore8,c.score as finalscore from(select objectid,matchid,adjustment,adjustType from {}) as
-piv PIVOT(max(adjustment) for adjustType in([0],[1],[2],[3],[4],[5],[6],[7],[8])) as a inner join {} as b on a.objectid=b.objectid and
+a.[8] as adjustedbaselinescore8,c.score as finalscore from(select objectid,matchid,adjustment,adjustType from {0}_adjust) as
+piv PIVOT(max(adjustment) for adjustType in([0],[1],[2],[3],[4],[5],[6],[7],[8])) as a inner join {0}_baseline as b on a.objectid=b.objectid and
 a.matchid=b.matchid left join ccm_index as c on c.objectid=b.objectid and c.matchid=b.matchid and
-c.indextype=(select max(indextype) from ccm_index) inner join specialists as d on d.objectid=a.matchid inner join {} as e on e.objectid=a.objectid order by e.objectid"""
+c.indextype=(select max(indextype) from ccm_index) inner join specialists as d on d.objectid=a.matchid inner join {0} as e on e.objectid=a.objectid order by e.objectid"""
 
 # factsheets_adjust  factsheets_baseline  factSheets
 # news_adjust  news_baseline  news
@@ -47,7 +47,7 @@ EXEC sp_executesql @query, N'@matchVariant varchar(50),@objectid varchar(50)',
 
 match_500_template = """select b.objectid,a.objectid as matchid, sum(b.score) as score, 500 as matchvariant 
 from specialists as a 
-inner join news_match b on b.matchid = a.objectid and b.matchvariant = {matchvariant}
+inner join {0}_match b on b.matchid = a.objectid and b.matchvariant = {matchvariant}
 group by b.objectid,a.objectid  
 order by b.objectid,sum(b.score) desc"""
 
@@ -56,18 +56,18 @@ order by b.objectid,sum(b.score) desc"""
 icd10_cpt_query_template = """select c.objectid, b.objectid as matchid,
 {operation} as qty from specialists_exactmatch as a 
 inner join specialists as b on a.objectid = b.objectid 
-inner join news_match as c on c.matchid = a.matchid 
+inner join {0}_match as c on c.matchid = a.matchid 
 where a.matchvariant = 100 and c.matchType = {matchtype} and c.score >= 
 (select top 1 score from (select distinct top 3 score 
-from news_match where objectid = c.objectid and matchtype = {matchtype} order by score desc) as a order by score) 
+from {0}_match where objectid = c.objectid and matchtype = {matchtype} order by score desc) as a order by score) 
 group by c.objectid,b.objectid 
 order by c.objectid,qty desc"""
 
 # count(1) sum(a.perc) 
 # 153 253
 
-news_text_query_template = """select b.text, sum(a.qty) as qty  
-from news_text as a 
+text_query_template = """select b.text, sum(a.qty) as qty  
+from {0}_text as a 
 inner join text as b on a.textid = b.textid 
 where objectid = {objectid} and b.type = {type}
 group by b.text 
@@ -75,8 +75,8 @@ order by qty desc"""
 
 # 1 2
 
-news_proc_query_template = """select c.text, d.text, sum(a.qty) as qty 
-from news_proc as a 
+proc_query_template = """select c.text, d.text, sum(a.qty) as qty 
+from {0}_proc as a 
 inner join text_pair as b on a.tpid = b.tpid 
 inner join text c on c.textid = b.textid1 
 inner join text d on d.textid = b.textid2 
@@ -84,8 +84,8 @@ where a.objectid = {objectid} and c.text!=d.text
 group by c.text,d.text 
 order by qty desc"""
 
-news_text_classified_query_template = """select b.text, sum(a.qty) as qty 
-from news_text_classified as a 
+text_classified_query_template = """select b.text, sum(a.qty) as qty 
+from {0}_text_classified as a 
 inner join text as b on a.textid = b.textid 
 where a.objectid = {objectid} and b.type = 1 and a.classid = {classid} and a.qty > 1
 group by b.text 
@@ -97,9 +97,15 @@ styles = '''<style>
 .table {
     font-size: 10px;
 }
-.table td, .table th, .table tr {
+.table td, .table tr {
     text-align: center;
     padding: 5px 0 0 0;
+}
+.table thead th {
+    text-align: center;
+}
+.table tbody tr th {
+    text-align: center;
 }
 </style>
 '''
@@ -113,8 +119,6 @@ def create_dataframe_from_sql(statement, as_string=False):
         for row in res:
             rows.append(row)
 
-        print(rows[:10])
-
         if as_string:
             return '\n'.join(map(lambda v: ', '.join(map(lambda x: str(x[1]), v.items())), rows))
 
@@ -122,7 +126,7 @@ def create_dataframe_from_sql(statement, as_string=False):
 
         return df
 
-def assemble_report(condition_filtered_df, report, title):
+def assemble_report_base(condition_filtered_df, report, title):
     top_baseline = condition_filtered_df.nlargest(10, 'baselinescore')
     top_final = condition_filtered_df.nlargest(10, 'finalscore')
 
@@ -172,78 +176,85 @@ def assemble_report(condition_filtered_df, report, title):
         '<p>' + str((10 - len(set(top_baseline['nameFull']) & set(top_final['nameFull']))) * 10) + '% of doctors from final top were not mentioned in baseline top</p>'
     )
 
-factsheets_adjust_statement = text(adjust_statement_template.format('factsheets_adjust', 'factsheets_baseline', 'factSheets'))
-news_adjust_statement = text(adjust_statement_template.format('news_adjust', 'news_baseline', 'news'))
+def create_report_for_theme(name):
+    df = create_dataframe_from_sql(text(adjust_statement_template.format(name)))
+    report = PDFReport()
+    total_report = PDFReport()
 
-factsheets_df = create_dataframe_from_sql(factsheets_adjust_statement)
-news_df = create_dataframe_from_sql(news_adjust_statement)
+    report.add_css('bootstrap.min.css')
+    total_report.add_css('bootstrap.min.css')
+    report.add_html(styles)
+    total_report.add_html(styles)
 
-factsheets_report = PDFReport()
-total_factsheets_report = PDFReport()
-news_report = PDFReport()
-total_news_report = PDFReport()
-
-factsheets_report.add_css('bootstrap.min.css')
-total_factsheets_report.add_css('bootstrap.min.css')
-news_report.add_css('bootstrap.min.css')
-total_news_report.add_css('bootstrap.min.css')
-
-factsheets_report.add_html(styles)
-total_factsheets_report.add_html(styles)
-news_report.add_html(styles)
-total_news_report.add_html(styles)
-
-for df, report, total_report in [(factsheets_df, factsheets_report, total_factsheets_report), (news_df, news_report, total_news_report)]:
-    assemble_report(df, total_report, 'Total results')
+    assemble_report_base(df, total_report, 'Total results')
 
     for variant in [500, 551, 552, 553, 554]:
+        local_df = create_dataframe_from_sql(text(match_500_template.format(name, matchvariant=variant)))
+
+        if local_df.empty:
+            res = ''
+        else:
+            res = local_df.head(10).to_html(index=False, classes=['table', 'table-condensed'])
+
         total_report.add_html(
-            f'<p>Match {variant}</p>'
-            '<p>' + str(create_dataframe_from_sql(text(match_500_template.format(matchvariant=variant)), as_string=True)) + '</p>'
+            f'<p>Match {variant}</p>' +
+            res
         )
 
     for operation in ['count(1)', 'sum(a.perc)']:
         for matchtype in [153, 253]:
+            local_df = create_dataframe_from_sql(text(icd10_cpt_query_template.format(name, operation=operation, matchtype=matchtype)))
+
+            if local_df.empty:
+                res = ''
+            else:
+                res = local_df.head(10).to_html(index=False, classes=['table', 'table-condensed'])
+
             total_report.add_html(
-                f'<p>Match operation {operation} and matchtype {matchtype}</p>'
-                '<p>' + str(create_dataframe_from_sql(text(icd10_cpt_query_template.format(operation=operation, matchtype=matchtype)), as_string=True)) + '</p>'
+                f'<p>Match operation {operation} and matchtype {matchtype}</p>' +
+                res
             )
 
-    for condition_title in df.head(1000)['ConditionTitle'].unique():
+    for condition_title in df.head['ConditionTitle'].unique():
         condition_filtered_df = df.loc[df.ConditionTitle == str(condition_title)]
 
-        assemble_report(condition_filtered_df, report, condition_title)
+        assemble_report_base(condition_filtered_df, report, condition_title)
 
         objectid = condition_filtered_df['objectid'].iloc[0]
 
         report.add_html(
             '<p>Match 300</p>'
-            '<p>' + str(create_dataframe_from_sql(text(match_300_query_template.format(objectid=objectid)), as_string=True)) + '</p>'
+            '<p>' + str(create_dataframe_from_sql(text(match_300_query_template.format(name, objectid=objectid)), as_string=True)) + '</p>'
         )
 
         for text_type in [1, 2]:
             report.add_html(
-                f'<p>Match text of type {text_type}</p>'
-                '<p>' + str(create_dataframe_from_sql(text(news_text_query_template.format(objectid=objectid, type=text_type)), as_string=True)) + '</p>'
+                f'<p>Match text of type {text_type}</p>' +
+                create_dataframe_from_sql(text(text_query_template.format(name, objectid=objectid, type=text_type))).to_html(index=False, classes=['table', 'table-condensed'])
             )
         
         report.add_html(
-            '<p>Match proc</p>'
-            '<p>' + str(create_dataframe_from_sql(text(news_proc_query_template.format(objectid=objectid)), as_string=True)) + '</p>'
+            '<p>Match proc</p>' +
+            create_dataframe_from_sql(text(proc_query_template.format(name, objectid=objectid))).to_html(index=False, classes=['table', 'table-condensed'])
         )
 
         for classid in ['6', '3', '1--']:
             report.add_html(
-                f'<p>Match text classified of class {classid}</p>'
-                '<p>' + str(create_dataframe_from_sql(text(news_text_classified_query_template.format(objectid=objectid, classid=classid)), as_string=True)) + '</p>'
+                f'<p>Match text classified of class {classid}</p>' +
+                create_dataframe_from_sql(text(text_classified_query_template.format(name, objectid=objectid, classid=classid))).to_html(index=False, classes=['table', 'table-condensed'])
             )
 
         report.add_html('<br>')
 
+    return df, report, total_report
+
+factsheets_df, factsheets_report, factsheets_total_report = create_report_for_theme('factsheets')
+news_df, news_report, news_total_report = create_report_for_theme('news')
+
 factsheets_report.export_report_to_pdf('factsheets_report.pdf')
-total_factsheets_report.export_report_to_pdf('total_factsheets_report.pdf')
+factsheets_total_report.export_report_to_pdf('total_factsheets_report.pdf')
 news_report.export_report_to_pdf('news_report.pdf')
-total_news_report.export_report_to_pdf('total_news_report.pdf')
+news_total_report.export_report_to_pdf('total_news_report.pdf')
 
 factsheets_df.to_csv('factsheets.csv')
 news_df.to_csv('news.csv')
@@ -252,4 +263,3 @@ upload_blob('factsheets_report.pdf', overwrite=True)
 upload_blob('total_factsheets_report.pdf', overwrite=True)
 upload_blob('news_report.pdf', overwrite=True)
 upload_blob('total_news_report.pdf', overwrite=True)
-
