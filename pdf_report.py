@@ -12,7 +12,7 @@ class PDFReport:
             self.__report_html += '<style>' + f.read() + '</style>'
 
     def add_figure(self, figure, width=600, height=300):
-        image = base64.b64encode(figure.to_image(format='png', width=width, height=height)).decode('utf-8')
+        image = base64.b64encode(figure.to_image(format='png', scale=3, width=width, height=height)).decode('utf-8')
 
         html_image = self.__image_template.format(image=image, width=width, height=height)
         self.__report_html += html_image
