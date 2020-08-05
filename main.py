@@ -93,6 +93,13 @@ order by qty desc"""
 
 # 6 3 1--
 
+url_query_template = """select a.id,a.contents,b.objectid,b.ConditionTitle,b.ymsid 
+from _am_ym_content as a 
+inner join {0} as b on a.id=b.tcmid 
+where a.type='{contenttype}' and key1 in('ymurl')"""
+
+# story(news) concept(factsheets)
+
 styles = '''<style>
 .table {
     font-size: 10px;
@@ -126,17 +133,37 @@ def create_dataframe_from_sql(statement, as_string=False):
 
         return df
 
-def assemble_report_base(condition_filtered_df, report, title):
-    top_baseline = condition_filtered_df.nlargest(10, 'baselinescore')
-    top_final = condition_filtered_df.nlargest(10, 'finalscore')
+def to_html_or_empty_string(df, **kwargs):
+    if df.empty:
+        return ''
+    else:
+        return df.to_html(**kwargs)
 
-    fig_baseline = px.histogram(condition_filtered_df, x="baselinescore")
+def get_difference_percent(df):
+    top_baseline = df.nlargest(10, 'baselinescore')
+    top_final = df.nlargest(10, 'finalscore')
+
+    return (10 - len(set(top_baseline['nameFull']) & set(top_final['nameFull']))) * 10
+
+def assemble_report_base(condition_filtered_df, report, title, url=''):
+    if url:
+        top_baseline = condition_filtered_df.nlargest(10, 'baselinescore')
+        top_final = condition_filtered_df.nlargest(10, 'finalscore')
+    else:
+        top_baseline = condition_filtered_df.nlargest(200, 'baselinescore').groupby('nameFull').count().reset_index().sort_values('baselinescore', ascending=False)
+        top_final = condition_filtered_df.nlargest(200, 'finalscore').groupby('nameFull').count().reset_index().sort_values('finalscore', ascending=False)
+
+    fig_baseline = px.histogram(condition_filtered_df[condition_filtered_df['baselinescore'] < 250], x="baselinescore")
+    fig_baseline_smaller = px.histogram(condition_filtered_df[condition_filtered_df['baselinescore'] < 50], x="baselinescore")
     fig_final = px.histogram(condition_filtered_df, x="finalscore")
 
     report.add_html(
         f'<h1 style="text-align: center">{title}</h1><br>'
     )
+    report.add_html('<a style="text-align: center">' + url + '</a>')
     report.add_figure(fig_baseline)
+    report.add_html('<br>')
+    report.add_figure(fig_baseline_smaller)
     report.add_html('<br>')
     report.add_figure(fig_final)
 
@@ -153,7 +180,7 @@ def assemble_report_base(condition_filtered_df, report, title):
     top_final_table.index = top_final_table.index + 1
     report.add_html(
         '<p>Top final score doctors</p>' +
-        top_final_table.to_html(header=False, classes=['table'])
+        top_final_table.to_html(header=False, classes=['table', 'table-condensed'])
     )
 
     insights_df = top_final\
@@ -173,7 +200,7 @@ def assemble_report_base(condition_filtered_df, report, title):
     )
 
     report.add_html(
-        '<p>' + str((10 - len(set(top_baseline['nameFull']) & set(top_final['nameFull']))) * 10) + '% of doctors from final top were not mentioned in baseline top</p>'
+        '<p>' + str(100 - (len(set(top_baseline['nameFull']) & set(top_final['nameFull'])) / len(top_baseline)) * 100) + '% of doctors from final top were not mentioned in baseline top</p>'
     )
 
 def create_report_for_theme(name):
@@ -186,41 +213,46 @@ def create_report_for_theme(name):
     report.add_html(styles)
     total_report.add_html(styles)
 
-    assemble_report_base(df, total_report, 'Total results')
+    assemble_report_base(df, total_report, f'Total {name} results')
 
-    for variant in [500, 551, 552, 553, 554]:
-        local_df = create_dataframe_from_sql(text(match_500_template.format(name, matchvariant=variant)))
-
-        if local_df.empty:
-            res = ''
-        else:
-            res = local_df.head(10).to_html(index=False, classes=['table', 'table-condensed'])
-
-        total_report.add_html(
-            f'<p>Match {variant}</p>' +
-            res
-        )
-
-    for operation in ['count(1)', 'sum(a.perc)']:
-        for matchtype in [153, 253]:
-            local_df = create_dataframe_from_sql(text(icd10_cpt_query_template.format(name, operation=operation, matchtype=matchtype)))
-
-            if local_df.empty:
-                res = ''
-            else:
-                res = local_df.head(10).to_html(index=False, classes=['table', 'table-condensed'])
-
-            total_report.add_html(
-                f'<p>Match operation {operation} and matchtype {matchtype}</p>' +
-                res
-            )
-
-    for condition_title in df.head['ConditionTitle'].unique():
+    difference_percents = []
+    for condition_title in df['ConditionTitle'].unique():
         condition_filtered_df = df.loc[df.ConditionTitle == str(condition_title)]
 
-        assemble_report_base(condition_filtered_df, report, condition_title)
+        difference_percents.append(get_difference_percent(condition_filtered_df))
+
+    total_report.add_figure(px.histogram(pd.DataFrame({'difference percents': difference_percents}), x='difference percents'))
+
+    url_df = create_dataframe_from_sql(text(url_query_template.format(name, contenttype=('story' if name == 'news' else 'concept'))))
+
+    # for variant in [500, 551, 552, 553, 554]:
+    #     local_df = create_dataframe_from_sql(text(match_500_template.format(name, matchvariant=variant)))
+
+    #     total_report.add_html(
+    #         f'<p>Match {variant}</p>' +
+    #         to_html_or_empty_string(local_df, index=False, classes=['table', 'table-condensed'])
+    #     )
+
+    # for operation in ['count(1)', 'sum(a.perc)']:
+    #     for matchtype in [153, 253]:
+    #         local_df = create_dataframe_from_sql(text(icd10_cpt_query_template.format(name, operation=operation, matchtype=matchtype)))
+
+    #         total_report.add_html(
+    #             f'<p>Match operation {operation} and matchtype {matchtype}</p>' +
+    #             to_html_or_empty_string(local_df, index=False, classes=['table', 'table-condensed'])
+    #         )
+
+    print(name, 'total report done')
+
+    amt = len(df['ConditionTitle'].unique())
+    counter = 1
+
+    for condition_title in df['ConditionTitle'].unique():
+        condition_filtered_df = df.loc[df.ConditionTitle == str(condition_title)]
 
         objectid = condition_filtered_df['objectid'].iloc[0]
+
+        assemble_report_base(condition_filtered_df, report, condition_title, str(url_df[url_df['objectid'] == objectid]['contents'].iloc[0]))
 
         report.add_html(
             '<p>Match 300</p>'
@@ -230,36 +262,53 @@ def create_report_for_theme(name):
         for text_type in [1, 2]:
             report.add_html(
                 f'<p>Match text of type {text_type}</p>' +
-                create_dataframe_from_sql(text(text_query_template.format(name, objectid=objectid, type=text_type))).to_html(index=False, classes=['table', 'table-condensed'])
+                to_html_or_empty_string(create_dataframe_from_sql(text(text_query_template.format(name, objectid=objectid, type=text_type))), index=False, classes=['table', 'table-condensed'])
             )
         
         report.add_html(
             '<p>Match proc</p>' +
-            create_dataframe_from_sql(text(proc_query_template.format(name, objectid=objectid))).to_html(index=False, classes=['table', 'table-condensed'])
+            to_html_or_empty_string(create_dataframe_from_sql(text(proc_query_template.format(name, objectid=objectid))), index=False, classes=['table', 'table-condensed'])
         )
 
         for classid in ['6', '3', '1--']:
             report.add_html(
                 f'<p>Match text classified of class {classid}</p>' +
-                create_dataframe_from_sql(text(text_classified_query_template.format(name, objectid=objectid, classid=classid))).to_html(index=False, classes=['table', 'table-condensed'])
+                to_html_or_empty_string(create_dataframe_from_sql(text(text_classified_query_template.format(name, objectid=objectid, classid=classid))), index=False, classes=['table', 'table-condensed'])
             )
 
         report.add_html('<br>')
+
+        print(f'{counter} of {amt} from {name} done')
+        counter += 1
+
+    print(name, 'done')
 
     return df, report, total_report
 
 factsheets_df, factsheets_report, factsheets_total_report = create_report_for_theme('factsheets')
 news_df, news_report, news_total_report = create_report_for_theme('news')
 
+# with open('temp.txt', 'w') as f:
+#     f.write(factsheets_total_report.generate_report_html())
+
+print('both done')
+
 factsheets_report.export_report_to_pdf('factsheets_report.pdf')
-factsheets_total_report.export_report_to_pdf('total_factsheets_report.pdf')
-news_report.export_report_to_pdf('news_report.pdf')
-news_total_report.export_report_to_pdf('total_news_report.pdf')
-
-factsheets_df.to_csv('factsheets.csv')
-news_df.to_csv('news.csv')
-
+print('factsheets report done')
 upload_blob('factsheets_report.pdf', overwrite=True)
+print('upload factsheets done')
+
+factsheets_total_report.export_report_to_pdf('total_factsheets_report.pdf')
+print('total factsheets report done')
 upload_blob('total_factsheets_report.pdf', overwrite=True)
+print('upload total factsheets done')
+
+news_report.export_report_to_pdf('news_report.pdf')
+print('news report done')
 upload_blob('news_report.pdf', overwrite=True)
+print('upload news done')
+
+news_total_report.export_report_to_pdf('total_news_report.pdf')
+print('total news report done')
 upload_blob('total_news_report.pdf', overwrite=True)
+print('upload total news done')
