@@ -93,6 +93,16 @@ order by qty desc"""
 
 # 6 3 1--
 
+# select top 10 a.objectid,a.namefull, 
+# (select contents from _am_ym_content where type = ‘specialist’ and id = a.objectid and key1=‘ymurl’) as profileurl
+# from specialists a
+
+specialists_url_query = """select a.id, a.contents, b.objectid, b.namefull
+from _am_ym_content as a
+inner join specialists as b on a.id=b.objectid
+where a.type='specialist' and a.key1='ymurl'
+"""
+
 url_query_template = """select a.id,a.contents,b.objectid,b.ConditionTitle,b.ymsid 
 from _am_ym_content as a 
 inner join {0} as b on a.id=b.tcmid 
@@ -145,41 +155,74 @@ def get_difference_percent(df):
 
     return (10 - len(set(top_baseline['nameFull']) & set(top_final['nameFull']))) * 10
 
-def assemble_report_base(condition_filtered_df, report, title, url=''):
+def add_zoomed_histograms(report, df, measurement, difference_value=5):
+    latest_series = df[measurement]
+
+    while True:
+        latest_max = latest_series.max()
+        latest_mean = latest_series.mean()
+
+        if latest_max / latest_mean > difference_value:
+            current_df = df[df[measurement] < latest_mean]
+            latest_series = current_df[measurement]
+
+            report.add_figure(px.histogram(current_df, x=measurement))
+            report.add_html(f'<br><p>{measurement} with {latest_mean} as max</p><br>')
+        else:
+            break
+
+def assemble_report_base(condition_filtered_df, report, title, url='', specialists_url_df=None):
     if url:
         top_baseline = condition_filtered_df.nlargest(10, 'baselinescore')
         top_final = condition_filtered_df.nlargest(10, 'finalscore')
+        top_title_template = 'Doctors {} top by score'
     else:
         top_baseline = condition_filtered_df.nlargest(200, 'baselinescore').groupby('nameFull').count().reset_index().sort_values('baselinescore', ascending=False)
         top_final = condition_filtered_df.nlargest(200, 'finalscore').groupby('nameFull').count().reset_index().sort_values('finalscore', ascending=False)
+        top_title_template = 'Number of times each doctor appeared in {} top 200'
 
-    fig_baseline = px.histogram(condition_filtered_df[condition_filtered_df['baselinescore'] < 250], x="baselinescore")
-    fig_baseline_smaller = px.histogram(condition_filtered_df[condition_filtered_df['baselinescore'] < 50], x="baselinescore")
+    top_baseline_table = pd.DataFrame({'full name': top_baseline['nameFull'], 'score': top_baseline['baselinescore']}).reset_index(drop=True)
+    top_final_table = pd.DataFrame({'full name': top_final['nameFull'], 'score': top_final['finalscore']}).reset_index(drop=True)
+
+    if specialists_url_df is not None:
+        top_baseline = top_baseline.merge(
+            specialists_url_df[['namefull', 'contents']], how='left', left_on='nameFull', right_on='namefull', suffixes=['', '_specialists']
+        ).drop(columns=['namefull'])
+        top_final = top_final.merge(
+            specialists_url_df[['namefull', 'contents']], how='left', left_on='nameFull', right_on='namefull', suffixes=['', '_specialists']
+        ).drop(columns=['namefull'])
+
+        top_baseline_table['url'] = top_baseline['contents']
+        top_final_table['url'] = top_final['contents']
+
+    top_baseline_table.index = top_baseline_table.index + 1
+    top_final_table.index = top_final_table.index + 1
+
+    fig_baseline = px.histogram(condition_filtered_df, x="baselinescore")
     fig_final = px.histogram(condition_filtered_df, x="finalscore")
+
+    baseline = condition_filtered_df['baselinescore']
+    final = condition_filtered_df['finalscore']
 
     report.add_html(
         f'<h1 style="text-align: center">{title}</h1><br>'
     )
     report.add_html('<a style="text-align: center">' + url + '</a>')
     report.add_figure(fig_baseline)
-    report.add_html('<br>')
-    report.add_figure(fig_baseline_smaller)
-    report.add_html('<br>')
-    report.add_figure(fig_final)
+    report.add_html(f'<p>Average value of baseline score is {baseline.mean()}<br>Median is {baseline.median()}<br>Minimum is {baseline.min()}<br>Maximum is {baseline.max()}</p><br>')
+    add_zoomed_histograms(report, condition_filtered_df, 'baselinescore')
 
-    top_baseline_table = pd.DataFrame({'full name': top_baseline['nameFull'], 'score': top_baseline['baselinescore']})\
-            .reset_index(drop=True)
-    top_baseline_table.index = top_baseline_table.index + 1
+    report.add_figure(fig_final)
+    report.add_html(f'<p>Average value of final score is {final.mean()}<br>Median is {final.median()}<br>Minimum is {final.min()}<br>Maximum is {final.max()}</p><br>')
+    add_zoomed_histograms(report, condition_filtered_df, 'finalscore')
+
     report.add_html(
-        '<p>Top baseline score doctors</p>' +
+        '<p>' + top_title_template.format('baseline') + '</p>' +
         top_baseline_table.to_html(header=False, classes=['table', 'table-condensed'])
     )
 
-    top_final_table = pd.DataFrame({'full name': top_final['nameFull'], 'score': top_final['finalscore']})\
-            .reset_index(drop=True)
-    top_final_table.index = top_final_table.index + 1
     report.add_html(
-        '<p>Top final score doctors</p>' +
+        '<p>' + top_title_template.format('final') + '</p>' +
         top_final_table.to_html(header=False, classes=['table', 'table-condensed'])
     )
 
@@ -207,13 +250,19 @@ def create_report_for_theme(name):
     df = create_dataframe_from_sql(text(adjust_statement_template.format(name)))
     report = PDFReport()
     total_report = PDFReport()
+    icd10_cpt_report = PDFReport()
 
     report.add_css('bootstrap.min.css')
     total_report.add_css('bootstrap.min.css')
+    icd10_cpt_report.add_css('bootstrap.min.css')
     report.add_html(styles)
     total_report.add_html(styles)
+    icd10_cpt_report.add_html(styles)
 
-    assemble_report_base(df, total_report, f'Total {name} results')
+    url_df = create_dataframe_from_sql(text(url_query_template.format(name, contenttype=('story' if name == 'news' else 'concept'))))
+    specialists_url_df = create_dataframe_from_sql(text(specialists_url_query))
+
+    assemble_report_base(df, total_report, f'Total {name} results', specialists_url_df=specialists_url_df)
 
     difference_percents = []
     for condition_title in df['ConditionTitle'].unique():
@@ -223,8 +272,6 @@ def create_report_for_theme(name):
 
     total_report.add_figure(px.histogram(pd.DataFrame({'difference percents': difference_percents}), x='difference percents'))
 
-    url_df = create_dataframe_from_sql(text(url_query_template.format(name, contenttype=('story' if name == 'news' else 'concept'))))
-
     # for variant in [500, 551, 552, 553, 554]:
     #     local_df = create_dataframe_from_sql(text(match_500_template.format(name, matchvariant=variant)))
 
@@ -233,16 +280,18 @@ def create_report_for_theme(name):
     #         to_html_or_empty_string(local_df, index=False, classes=['table', 'table-condensed'])
     #     )
 
-    # for operation in ['count(1)', 'sum(a.perc)']:
-    #     for matchtype in [153, 253]:
-    #         local_df = create_dataframe_from_sql(text(icd10_cpt_query_template.format(name, operation=operation, matchtype=matchtype)))
+    for operation in ['count(1)', 'sum(a.perc)']:
+        for matchtype in [153, 253]:
+            local_df = create_dataframe_from_sql(text(icd10_cpt_query_template.format(name, operation=operation, matchtype=matchtype)))
 
-    #         total_report.add_html(
-    #             f'<p>Match operation {operation} and matchtype {matchtype}</p>' +
-    #             to_html_or_empty_string(local_df, index=False, classes=['table', 'table-condensed'])
-    #         )
+            icd10_cpt_report.add_html(
+                f'<p>Match operation {operation} and matchtype {matchtype}</p>' +
+                to_html_or_empty_string(local_df.head(20), index=False, classes=['table', 'table-condensed'])
+            )
 
     print(name, 'total report done')
+
+    # return df, report, total_report, icd10_cpt_report
 
     amt = len(df['ConditionTitle'].unique())
     counter = 1
@@ -252,7 +301,7 @@ def create_report_for_theme(name):
 
         objectid = condition_filtered_df['objectid'].iloc[0]
 
-        assemble_report_base(condition_filtered_df, report, condition_title, str(url_df[url_df['objectid'] == objectid]['contents'].iloc[0]))
+        assemble_report_base(condition_filtered_df, report, condition_title, str(url_df[url_df['objectid'] == objectid]['contents'].iloc[0]), specialists_url_df=specialists_url_df)
 
         report.add_html(
             '<p>Match 300</p>'
@@ -283,10 +332,10 @@ def create_report_for_theme(name):
 
     print(name, 'done')
 
-    return df, report, total_report
+    return df, report, total_report, icd10_cpt_report
 
-factsheets_df, factsheets_report, factsheets_total_report = create_report_for_theme('factsheets')
-news_df, news_report, news_total_report = create_report_for_theme('news')
+factsheets_df, factsheets_report, factsheets_total_report, factsheets_icd10_cpt_report = create_report_for_theme('factsheets')
+news_df, news_report, news_total_report, news_icd10_cpt_report = create_report_for_theme('news')
 
 # with open('temp.txt', 'w') as f:
 #     f.write(factsheets_total_report.generate_report_html())
@@ -297,6 +346,16 @@ factsheets_report.export_report_to_pdf('factsheets_report.pdf')
 print('factsheets report done')
 upload_blob('factsheets_report.pdf', overwrite=True)
 print('upload factsheets done')
+
+# factsheets_icd10_cpt_report.export_report_to_pdf('factsheets_icd10_cpt_report.pdf')
+# print('factsheets icd10_cpt report done')
+# upload_blob('factsheets_icd10_cpt_report.pdf', overwrite=True)
+# print('upload factsheets icd10_cpt report done')
+
+# news_icd10_cpt_report.export_report_to_pdf('news_icd10_cpt_report.pdf')
+# print('news icd10_cpt report done')
+# upload_blob('news_icd10_cpt_report.pdf', overwrite=True)
+# print('upload news icd10_cpt report done')
 
 factsheets_total_report.export_report_to_pdf('total_factsheets_report.pdf')
 print('total factsheets report done')
